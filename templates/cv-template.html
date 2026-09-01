@@ -185,6 +185,7 @@
   /* === WORK EXPERIENCE === */
   .job {
     margin-bottom: 14px;
+    padding-top: 6px;
   }
 
   .job-header {
@@ -193,6 +194,7 @@
     align-items: baseline;
     gap: 12px;
     margin-bottom: 4px;
+    line-height: 1.4;
   }
 
   .job-company {
@@ -433,11 +435,14 @@
   }
 
   /* === PAGE BREAK CONTROL === */
-  /* Only avoid breaking small atomic units (a cert row, an education line, the
-     header, a single competency or skill).  Sections and multi-bullet roles are
-     allowed to flow across a page boundary so content packs tight instead of
-     jumping wholesale and leaving large bottom gaps. */
+  /* Small atomic units (a cert row, an education line, the header, a single
+     competency or skill) never break.
+     `.job` is a local override of the upstream default, which lets multi-bullet
+     roles flow across a page boundary to pack content tight: a work entry split
+     mid-bullets reads as two half-jobs to a human skimming the PDF, so we take
+     the bottom gap instead. */
   .header,
+  .job,
   .edu-item,
   .cert-item,
   .competency-tag,
