@@ -407,11 +407,11 @@ const twoPassManifestChecks = [
   },
   {
     name: 'apply commit is scoped to expanded update files, not directories (#3504)',
-    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.expandedPathsToStage\)/,
+    pattern: /commitPaths\(`[^`]+`,\s*expandedPathsToStage\)/,
   },
   {
     name: 'rollback commit is scoped to expanded backup files, not directories (#3504)',
-    pattern: /git\('commit',\s*'-m',[^)]+'--',\s*\.\.\.expandedRollbackPaths\)/,
+    pattern: /commitPaths\(`[^`]+`,\s*expandedRollbackPaths\)/,
   },
   {
     name: 'apply captures uncommitted work via git stash create before branching (#915)',
