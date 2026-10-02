@@ -1056,6 +1056,19 @@ export function gitIn(root, ...args) {
   return gitRawIn(root, ...args).trim();
 }
 
+/** gitIn(), with `input` written to the child's stdin. */
+export function gitInputIn(root, input, ...args) {
+  const timeout = gitTimeoutMs(args);
+  try {
+    return execFileSync('git', args, { cwd: root, encoding: 'utf-8', timeout, input }).trim();
+  } catch (err) {
+    if (isTimeoutLikeError(err)) {
+      throw new Error(`${describeGitCommand(args)} timed out after ${timeoutSeconds(timeout)}s. If your network is slow, retry or set ${gitTimeoutEnvVar(args)} to a larger value.`);
+    }
+    throw err;
+  }
+}
+
 function git(...args) {
   return gitIn(ROOT, ...args);
 }
@@ -2462,6 +2475,71 @@ export function addPaths(paths, ctx = {}) {
   flush();
 }
 
+/** True when this git understands --pathspec-from-file (2.25 and later). */
+export function gitHasPathspecFromFile(runGit = git) {
+  const version = /(\d+)\.(\d+)/.exec(runGit('--version'));
+  if (!version) return false;
+  const [major, minor] = [Number(version[1]), Number(version[2])];
+  return major > 2 || (major === 2 && minor >= 25);
+}
+
+/**
+ * `git commit -m <message> -- <paths>`, with the pathspec moved to stdin once it
+ * outgrows ADD_ARGV_BUDGET.
+ *
+ * addPaths() batches `git add`, but one commit cannot be split, and on Windows a
+ * command line over 32767 characters fails with ENAMETOOLONG before git starts:
+ * a v1.32.0 → v1.35.0 update stages about 600 paths. Over the budget the list
+ * goes NUL-separated through stdin. Under it, or with a git older than 2.25
+ * (no --pathspec-from-file), the argv form is kept: that is what every update
+ * ran before, and it still fits everywhere but Windows. Both forms are
+ * literal, as in addPaths(): these are filenames.
+ *
+ * @param {string} message - Commit message.
+ * @param {string[]} paths - Files to commit.
+ * @param {object} [ctx] - Seams: ctx.git(...args) for the argv form and the
+ *   version probe, ctx.gitInput(input, ...args) for the stdin form, ctx.root
+ *   for the default stdin runner's working directory.
+ */
+export function commitPaths(message, paths, ctx = {}) {
+  const runGit = ctx.git || git;
+  const width = paths.reduce((sum, path) => sum + path.length + 1, 0);
+  if (width <= ADD_ARGV_BUDGET || !gitHasPathspecFromFile(runGit)) {
+    runGit('--literal-pathspecs', 'commit', '-m', message, '--', ...paths);
+    return;
+  }
+  const runInput = ctx.gitInput || ((input, ...args) => gitInputIn(ctx.root || ROOT, input, ...args));
+  runInput(`${paths.join('\0')}\0`, '--literal-pathspecs', 'commit', '-m', message,
+    '--pathspec-from-file=-', '--pathspec-file-nul');
+}
+
+/**
+ * The command a user can paste to finish a commitPaths() commit that failed.
+ * Inlining a list past ADD_ARGV_BUDGET would fail the same way the commit did,
+ * so a long list is written NUL-separated to a file in the git dir and the
+ * command reads it from there.
+ *
+ * @param {string} message - Commit message.
+ * @param {string[]} paths - Files to commit.
+ * @param {object} [ctx] - Seams: ctx.git(...args), ctx.root.
+ * @returns {string} Shell command.
+ */
+export function recoveryCommitCommand(message, paths, ctx = {}) {
+  const runGit = ctx.git || git;
+  const width = paths.reduce((sum, path) => sum + path.length + 1, 0);
+  if (width > ADD_ARGV_BUDGET && gitHasPathspecFromFile(runGit)) {
+    try {
+      const listFile = runGit('rev-parse', '--git-path', 'career-ops-update-paths');
+      writeFileSync(resolve(ctx.root || ROOT, listFile), `${paths.join('\0')}\0`);
+      return `git --literal-pathspecs commit -m "${message}" --pathspec-from-file=${listFile} --pathspec-file-nul`;
+    } catch {
+      // Fall through to the inline form: long, but still the right command.
+    }
+  }
+  const pathspec = paths.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(' ');
+  return `git --literal-pathspecs commit -m "${message}" -- ${pathspec}`;
+}
+
 /**
  * Refuse anything that would make `git add -f` recurse.
  *
@@ -3866,7 +3944,7 @@ async function apply() {
       if (usedIndexCommit) {
         git('commit', '-m', `chore: auto-update system files to v${remote}`);
       } else {
-        git('commit', '-m', `chore: auto-update system files to v${remote}`, '--', ...expandedPathsToStage);
+        commitPaths(`chore: auto-update system files to v${remote}`, expandedPathsToStage);
       }
     } catch (e) {
       let commitFailed = false;
@@ -3883,14 +3961,13 @@ async function apply() {
       }
 
       if (commitFailed) {
-        const pathspec = expandedPathsToStage.map(p => `'${p.replace(/'/g, "'\\''")}'`).join(' ');
         // Print the command matching the path actually taken. Suggesting the
         // pathspec form after the index form was selected would tell the user to
         // run the very thing that drops the staged mode bits — a recovery step
         // that quietly reintroduces the bug it is recovering from.
         const recovery = usedIndexCommit
           ? `git commit -m "chore: auto-update system files to v${remote}"`
-          : `git commit -m "chore: auto-update system files to v${remote}" -- ${pathspec}`;
+          : recoveryCommitCommand(`chore: auto-update system files to v${remote}`, expandedPathsToStage);
         throw new Error(
           `Update commit failed (files may be staged but not committed).\n` +
           `    Error: ${e.message.split('\n')[0]}\n` +
@@ -4021,7 +4098,7 @@ function rollback() {
       // Scope the commit to the rollback paths (#915 bug 2). A bare
       // `git commit` would sweep unrelated staged files into the rollback.
       if (expandedRollbackPaths.length > 0) {
-        git('commit', '-m', `chore: rollback system files from ${latest}`, '--', ...expandedRollbackPaths);
+        commitPaths(`chore: rollback system files from ${latest}`, expandedRollbackPaths);
       }
     } catch {
       // Tolerate any commit failure here — the common case is the
